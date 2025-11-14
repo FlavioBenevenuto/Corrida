@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Corrida Top-Down - Protótipo Completo</title>
+<title>Corrida Top-Down - Protótipo Completo (corrigido)</title>
 <style>
   html,body{height:100%;margin:0;background:#111;color:#fff;font-family:Arial,Helvetica,sans-serif}
   #game-container{width:100%;height:100vh;overflow:hidden;display:block;position:relative}
@@ -12,7 +12,7 @@
   #message{position:absolute;left:50%;top:40%;transform:translate(-50%,-50%);z-index:60;background:rgba(0,0,0,0.6);padding:14px;border-radius:8px;display:none}
   a.small{color:#8ad;text-decoration:none}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
 </head>
 <body>
 <div id="game-container"></div>
@@ -20,12 +20,7 @@
 <script>
 /*
   Protótipo completo de corrida top-down (single-file)
-  - pista desenhada via Graphics
-  - sprite do carro gerado em runtime (textura)
-  - IA simples (bots) seguindo waypoints
-  - checkpoints, voltas, tempo, HUD
-  - obstáculos, partículas, som (WebAudio)
-  - power-up de boost
+  (versão corrigida)
 */
 const GAME_WIDTH = Math.min(1100, window.innerWidth);
 const GAME_HEIGHT = Math.min(700, window.innerHeight);
@@ -41,61 +36,50 @@ const config = {
 };
 const game = new Phaser.Game(config);
 
-let player, cursors, keys, trackLayer, hud;
+let player, cursors, keys;
 let bots = [];
 let checkpoints = [];
-let currentCheckpoint = 0;
-let lap = 0;
-let maxLaps = 3;
-let startTime=0, bestTime=0;
+let startTime=0;
 let timerText, lapText, posText, messageDiv;
 let boostPads = [];
-let score = 0;
+let outerShape = null, innerShape = null; // tornar globais
+let globalEmitter = null;
 
-function preload(){ /* no external assets; generate in create() */ }
+function preload(){ /* sem assets externos */ }
 
 function create(){
   const scene = this;
   messageDiv = document.getElementById('message');
 
-  // generate textures: car, bot, coin, rock, boost
+  // generate textures
   const g = this.make.graphics({x:0,y:0,add:false});
-  // player car (triangle front)
   g.fillStyle(0xff4d4d,1);
   g.beginPath(); g.moveTo(16,0); g.lineTo(32,48); g.lineTo(0,48); g.closePath(); g.fillPath();
   g.generateTexture('car',32,48); g.clear();
-  // bot car (blue)
   g.fillStyle(0x4da6ff,1); g.beginPath(); g.moveTo(16,0); g.lineTo(32,48); g.lineTo(0,48); g.closePath(); g.fillPath();
   g.generateTexture('bot',32,48); g.clear();
-  // coin (gold)
   g.fillStyle(0xffdd57,1); g.fillCircle(10,10,8); g.generateTexture('coin',20,20); g.clear();
-  // rock (gray)
   g.fillStyle(0x7d7d7d,1); g.fillCircle(12,12,10); g.generateTexture('rock',24,24); g.clear();
-  // boost pad (green)
   g.fillStyle(0x38b000,1); g.fillRoundedRect(0,0,60,20,6); g.generateTexture('boost',60,20); g.clear();
 
-  // create track background using graphics (simple oval track)
+  // create track background
   const bg = this.add.graphics();
   const pad = 40;
   const w = GAME_WIDTH; const h = GAME_HEIGHT;
   bg.fillStyle(0x2b2b2b,1);
   bg.fillRect(0,0,w,h);
 
-  // draw outer and inner track shapes (rounded rectangle racetrack)
-  const outer = new Phaser.Geom.RoundRectangle(pad,pad,w-2*pad,h-2*pad,80);
-  const inner = new Phaser.Geom.RoundRectangle(pad+140,pad+80,w-2*pad-280,h-2*pad-160,60);
+  // outer and inner shapes (guardar nas variáveis globais)
+  outerShape = new Phaser.Geom.RoundRectangle(pad,pad,w-2*pad,h-2*pad,80);
+  innerShape = new Phaser.Geom.RoundRectangle(pad+140,pad+80,w-2*pad-280,h-2*pad-160,60);
 
   bg.fillStyle(0x1f2933,1); bg.fillRect(0,0,w,h);
-  // grass
   bg.fillStyle(0x0f3b1f,1); bg.fillRoundedRect(0,0,w,h,0);
-  // racetrack (outer darker)
-  bg.fillStyle(0x2e2e2e,1); bg.fillRoundedRect(outer.x,outer.y,outer.width,outer.height,80);
-  // track inner cutout (grass)
-  bg.fillStyle(0x14321b,1); bg.fillRoundedRect(inner.x,inner.y,inner.width,inner.height,60);
-  // centerline - dashed
-  drawCenterLine(bg, outer, inner);
+  bg.fillStyle(0x2e2e2e,1); bg.fillRoundedRect(outerShape.x,outerShape.y,outerShape.width,outerShape.height,80);
+  bg.fillStyle(0x14321b,1); bg.fillRoundedRect(innerShape.x,innerShape.y,innerShape.width,innerShape.height,60);
+  drawCenterLine(bg, outerShape, innerShape);
 
-  // add static obstacles on track (rocks)
+  // static obstacles
   const rocksGroup = this.physics.add.staticGroup();
   placeRock(rocksGroup, w*0.3, h*0.25);
   placeRock(rocksGroup, w*0.7, h*0.75);
@@ -106,22 +90,23 @@ function create(){
   createBoost(boosts, w*0.5 - 150, h*0.5+150);
   createBoost(boosts, w*0.5 + 120, h*0.5-150);
 
-  // checkpoints: create several points around the inner rectangle to count laps
+  // checkpoints
+  checkpoints = [];
   const cps = [
-    {x: w/2, y: pad+10},           // top
-    {x: w-pad-10, y: h/2},         // right
-    {x: w/2, y: h-pad-10},         // bottom
-    {x: pad+10, y: h/2}            // left
+    {x: w/2, y: pad+10},
+    {x: w-pad-10, y: h/2},
+    {x: w/2, y: h-pad-10},
+    {x: pad+10, y: h/2}
   ];
   cps.forEach((c,i)=>{
-    const rect = this.add.rectangle(c.x,c.y, inner.width*0.2, inner.height*0.05, 0xfff, 0.001);
+    const rect = this.add.rectangle(c.x,c.y, innerShape.width*0.2, innerShape.height*0.05, 0xffffff, 0.001);
     this.physics.add.existing(rect, true);
     rect.cpIndex = i;
     checkpoints.push(rect);
   });
 
-  // create player
-  player = this.physics.add.sprite(w/2, h/2 - inner.height/2 - 40, 'car');
+  // player
+  player = this.physics.add.sprite(w/2, h/2 - innerShape.height/2 - 40, 'car');
   player.setOrigin(0.5,0.5);
   player.setDepth(5);
   player.body.setSize(20,36);
@@ -132,11 +117,10 @@ function create(){
   player.laps = 0;
   player.nextCp = 0;
 
-  // create bots
-  const waypoints = generateWaypoints(outer, inner);
+  // bots
   for(let i=0;i<3;i++){
     const b = this.physics.add.sprite(player.x + (i+1)*40, player.y + (i+1)*30, 'bot');
-    b.wayIndex = Math.floor((i/3)*waypoints.length);
+    b.wayIndex = Math.floor((i/3)*24);
     b.maxSpeed = 300 - i*30;
     b.acc = 160;
     bots.push(b);
@@ -147,14 +131,14 @@ function create(){
   this.physics.add.collider(bots, rocksGroup);
   this.physics.add.overlap(player, boosts, (p, pad)=>{ triggerBoost(p); }, null, this);
 
-  // camera follow and bounds
+  // camera
   this.cameras.main.setBounds(0,0,w,h);
   this.cameras.main.startFollow(player,true,0.08,0.08);
   this.cameras.main.setZoom(1.0);
 
   // HUD
   timerText = this.add.text(12,12,'Tempo: 0.00',{font:'18px Arial',fill:'#fff'}).setScrollFactor(0).setDepth(60);
-  lapText = this.add.text(12,36,'Volta: 0/'+maxLaps,{font:'18px Arial',fill:'#fff'}).setScrollFactor(0).setDepth(60);
+  lapText = this.add.text(12,36,'Volta: 0/3',{font:'18px Arial',fill:'#fff'}).setScrollFactor(0).setDepth(60);
   posText = this.add.text(GAME_WIDTH-12,12,'Pos: 1/4',{font:'18px Arial',fill:'#fff'}).setOrigin(1,0).setScrollFactor(0).setDepth(60);
 
   // controls
@@ -165,11 +149,11 @@ function create(){
   startTime = performance.now();
   scene.time.addEvent({ delay: 100, loop:true, callback: updateTimer, callbackScope: scene });
 
-  // particle emitter for sparks
+  // particles & emitter (guardar global para usar em outras funções)
   const particles = this.add.particles('coin');
-  this.emitter = particles.createEmitter({ speed: {min:20,max:120}, lifespan:300, quantity:6, scale:{start:0.5,end:0.1}, on:false });
+  globalEmitter = particles.createEmitter({ speed: {min:20,max:120}, lifespan:300, quantity:6, scale:{start:0.5,end:0.1}, on:false });
 
-  // simple audio beeps using WebAudio oscillator
+  // audio helper
   window.playBeep = function(freq,dur,vol=0.05){
     try{
       const ctx = window.__audioCtx || (window.__audioCtx = new (window.AudioContext || window.webkitAudioContext)());
@@ -183,24 +167,20 @@ function create(){
     }catch(e){}
   };
 
-  // display initial message
   showMessage('Use WASD/Setas: acelerar, frear e virar. Colete moedas, use boost (verde). R para reiniciar.');
 }
 
 function update(time,dt){
   const scene = this;
   if (!player) return;
-  // controls - acceleration and turning
   const up = cursors.up.isDown || keys.W.isDown;
   const down = cursors.down.isDown || keys.S.isDown;
   const left = cursors.left.isDown || keys.A.isDown;
   const right = cursors.right.isDown || keys.D.isDown;
 
-  // forward vector from angle
   const rad = Phaser.Math.DegToRad(player.angle-90);
   const fx = Math.cos(rad), fy = Math.sin(rad);
 
-  // acceleration
   if (up){
     player.body.velocity.x += fx * player.acc * (dt/1000);
     player.body.velocity.y += fy * player.acc * (dt/1000);
@@ -211,24 +191,18 @@ function update(time,dt){
     player.body.velocity.y += -fy * player.acc * 0.6 * (dt/1000);
   }
 
-  // turning depends on speed
   const speed = Math.sqrt(player.body.velocity.x*player.body.velocity.x + player.body.velocity.y*player.body.velocity.y);
   const turnFactor = Phaser.Math.Clamp(speed/ player.maxSpeed, 0, 1);
   if (left) player.angle -= player.turnSpeed * (dt/1000) * (0.5 + 0.5*turnFactor);
   if (right) player.angle += player.turnSpeed * (dt/1000) * (0.5 + 0.5*turnFactor);
 
-  // apply drift (gradual slowdown)
   player.body.velocity.x *= player.drift;
   player.body.velocity.y *= player.drift;
-  // limit
-  const lim = player.maxSpeed;
-  Phaser.Math.Clamp(player.body.velocity.x, -lim, lim);
-  Phaser.Math.Clamp(player.body.velocity.y, -lim, lim);
 
-  // bots simple waypoint following
+  // update bots (sem chamar generateWaypoints() sem args)
   updateBots(this, dt);
 
-  // checkpoints - check overlap manually (small distance)
+  // checkpoints
   checkpoints.forEach(cp=>{
     const d = Phaser.Math.Distance.Between(player.x,player.y, cp.x, cp.y);
     if (d < 80){
@@ -237,8 +211,8 @@ function update(time,dt){
         playBeep(800,50,0.02);
         if (player.nextCp === 0){
           player.laps += 1;
-          lapText.setText('Volta: '+player.laps+'/'+maxLaps);
-          if (player.laps >= maxLaps){
+          lapText.setText('Volta: '+player.laps+'/3');
+          if (player.laps >= 3){
             endRace(this);
           }
         }
@@ -246,10 +220,8 @@ function update(time,dt){
     }
   });
 
-  // update HUD position and timer
   updatePositionText();
 
-  // restart
   if (Phaser.Input.Keyboard.JustDown(keys.R)){
     this.scene.restart();
   }
@@ -257,7 +229,7 @@ function update(time,dt){
 
 function updateTimer(){
   const t = (performance.now() - startTime)/1000;
-  timerText.setText('Tempo: '+t.toFixed(2)+'s');
+  if (timerText) timerText.setText('Tempo: '+t.toFixed(2)+'s');
 }
 
 function endRace(scene){
@@ -274,9 +246,7 @@ function showMessage(text){
   setTimeout(()=>{ div.style.display='none'; }, 4500);
 }
 
-// helpers --------------------------------------------------
 function drawCenterLine(g, outer, inner){
-  // draw dashed center between outer and inner by sampling along ellipse-ish path
   g.lineStyle(2,0xffffff,0.4);
   const steps = 160;
   for(let i=0;i<steps;i++){
@@ -304,22 +274,18 @@ function createBoost(group,x,y){
 }
 
 function triggerBoost(p){
-  // quick forward impulse
   const rad = Phaser.Math.DegToRad(p.angle-90);
   const fx = Math.cos(rad), fy = Math.sin(rad);
   p.body.velocity.x += fx * 700;
   p.body.velocity.y += fy * 700;
   window.playBeep(1200,80,0.02);
-  // emitter effect
-  if (window.emitter) window.emitter.emitParticleAt(p.x, p.y, 10);
+  if (globalEmitter) globalEmitter.emitParticleAt(p.x, p.y, 10);
 }
 
 function generateWaypoints(outer, inner){
   const pts = [];
   const cx = outer.x + outer.width/2;
   const cy = outer.y + outer.height/2;
-  const rx = (outer.width-inner.width)/2 + inner.width/2;
-  const ry = (outer.height-inner.height)/2 + inner.height/2;
   const steps = 24;
   for(let i=0;i<steps;i++){
     const ang = (i/steps) * Math.PI*2;
@@ -331,27 +297,19 @@ function generateWaypoints(outer, inner){
 }
 
 function updateBots(scene, dt){
-  const waypoints = generateWaypoints(); // not used here but okay
+  // bots follow implicit circular waypoints using their wayIndex
   bots.forEach((b,bi)=>{
-    // find next point in an implicit loop
-    if (!b.wayIndex) b.wayIndex = 0;
+    if (!b.wayIndex && b.wayIndex !== 0) b.wayIndex = 0;
     const target = getWaypointForBot(b);
-    // steering towards target
     const angTo = Phaser.Math.RadToDeg(Phaser.Math.Angle.Between(b.x,b.y,target.x,target.y)) + 90;
-    // rotate smoothly
     let diff = Phaser.Math.Angle.WrapDegrees(angTo - b.angle);
     b.angle += diff * 0.08;
-    // accelerate towards target
     const rad = Phaser.Math.DegToRad(b.angle-90);
     b.body.velocity.x += Math.cos(rad) * b.acc * (dt/1000);
     b.body.velocity.y += Math.sin(rad) * b.acc * (dt/1000);
-    // clamp and friction
     b.body.velocity.x *= 0.98; b.body.velocity.y *= 0.98;
     const sp = Math.sqrt(b.body.velocity.x*b.body.velocity.x + b.body.velocity.y*b.body.velocity.y);
-    if (sp > b.maxSpeed){
-      b.body.velocity.x *= 0.96; b.body.velocity.y *= 0.96;
-    }
-    // check distance to target
+    if (sp > b.maxSpeed){ b.body.velocity.x *= 0.96; b.body.velocity.y *= 0.96; }
     if (Phaser.Math.Distance.Between(b.x,b.y,target.x,target.y) < 40){
       b.wayIndex = (b.wayIndex+1) % 24;
     }
@@ -359,8 +317,8 @@ function updateBots(scene, dt){
 }
 
 function getWaypointForBot(b){
-  // approximate waypoints around center
-  const cx = GAME_WIDTH/2; const cy = GAME_HEIGHT/2;
+  const cx = outerShape.x + outerShape.width/2;
+  const cy = outerShape.y + outerShape.height/2;
   const r = Math.min(GAME_WIDTH, GAME_HEIGHT)/2 - 160;
   const i = b.wayIndex || 0;
   const ang = (i/24)*Math.PI*2;
@@ -370,26 +328,19 @@ function getWaypointForBot(b){
 }
 
 function hitObstacle(p, rock){
-  // small bounce and reduce speed
   p.body.velocity.x *= -0.45;
   p.body.velocity.y *= -0.45;
   playBeep(160,180,0.03);
-  // particle burst
-  if (window.emitter) window.emitter.emitParticleAt(p.x,p.y,12);
+  if (globalEmitter) globalEmitter.emitParticleAt(p.x,p.y,12);
 }
 
-// position text update (player rank among bots)
 function updatePositionText(){
+  if (!player) return;
   const arr = [{id:'player',x:player.x,y:player.y}].concat(bots.map((b,i)=>({id:'bot'+i,x:b.x,y:b.y})));
-  // compute distance to finish line (top checkpoint) by y coordinate roughly
-  arr.sort((a,b)=>b.y - a.y); // simple sort; not accurate but ok for prototype
+  arr.sort((a,b)=>b.y - a.y);
   const pos = arr.findIndex(it=>it.id==='player') + 1;
-  posText.setText('Pos: '+pos+'/'+(1+bots.length));
+  if (posText) posText.setText('Pos: '+pos+'/'+(1+bots.length));
 }
-
-// small utility to save file (not used here but helpful later)
-function downloadText(filename, text){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text],{type:'text/plain'})); a.download=filename; a.click(); }
-
 </script>
 </body>
 </html>
